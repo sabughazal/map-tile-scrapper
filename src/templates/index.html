@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Map Tile Scrapper</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@9.2.4/ol.css">
+    <link rel="stylesheet" href="/static/css/index.css">
+
+    <link rel="shortcut icon" href="/static/favicon.ico" type="image/x-icon">
+</head>
+<body>
+    <div class="overlay">
+        <h1>OpenLayers Tile Preview</h1>
+        <p>Tiles are served through /scrapper/{z}/{x}/{y}</p>
+    </div>
+    <div id="map" aria-label="Map"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/ol@9.2.4/dist/ol.js"></script>
+    <script>
+        const map = new ol.Map({
+            target: "map",
+            layers: [
+                new ol.layer.Tile({
+                    source: new ol.source.XYZ({
+                        url: "/scrapper/base/{z}/{x}/{y}",
+                        maxZoom: 21,
+                        crossOrigin: "anonymous"
+                    })
+                })
+            ],
+            view: new ol.View({
+                center: ol.proj.fromLonLat([24, 54]),
+                zoom: 8,
+                minZoom: 2,
+                maxZoom: 21
+            })
+        });
+    </script>
+</body>
+</html>
