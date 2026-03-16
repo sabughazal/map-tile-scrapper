@@ -1,6 +1,5 @@
 import sys
 import pathlib
-import argparse
 import requests
 from typing import Optional
 
@@ -21,7 +20,6 @@ from src.config import settings
 BASE_DIR = pathlib.Path(__file__).parent.resolve()
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
-DEFAULT_SOURCE_URL = "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
 
 
 class Extent(BaseModel):
@@ -36,16 +34,7 @@ class TileCountRequest(BaseModel):
     z: int
 
 
-def get_inline_arguments():
-    parser = argparse.ArgumentParser(description="Map Tile Scrapper")
-    parser.add_argument("--source-url", type=str, default=DEFAULT_SOURCE_URL, help="URL template for the map tiles")
-    parser.add_argument("--output-dir", type=str, default=str(settings.OUTPUT_DIR), help="Directory to save the scraped tiles")
-    parser.add_argument("--host", type=str, default=settings.HOST, help="Host to run the server on")
-    parser.add_argument("--port", type=int, default=settings.PORT, help="Port to run the server on")
-    return parser.parse_args()
-
-
-def create_app(args) -> FastAPI:
+def create_app() -> FastAPI:
 
     app = FastAPI(title="Map Tile Scrapper")
 
@@ -62,16 +51,16 @@ def create_app(args) -> FastAPI:
 
     @app.get("/scrapper/{z}/{x}/{y}")
     async def scrape_tile(z: int, x: int, y: int):
-        collection = str(hash(args.source_url))
+        collection = str(hash(settings.SOURCE_URL))
 
-        output_path = pathlib.Path(args.output_dir) / collection / str(z) / str(x)
+        output_path = pathlib.Path(settings.OUTPUT_DIR) / collection / str(z) / str(x)
         output_path.mkdir(parents=True, exist_ok=True)
         tile_path = output_path / f"{y}.png"
 
         if tile_path.exists():
             return Response(content=tile_path.read_bytes(), media_type="image/png")
 
-        url = args.source_url.format(x=x, y=y, z=z)
+        url = settings.SOURCE_URL.format(x=x, y=y, z=z)
         response = requests.get(url, timeout=15)
 
         if response.status_code != 200:
@@ -89,8 +78,8 @@ def create_app(args) -> FastAPI:
 
     @app.post("/scrapper/get-tile-count")
     async def get_tile_count(request: TileCountRequest):
-        collection = str(hash(args.source_url))
-        output_path = pathlib.Path(args.output_dir) / collection / str(request.z)
+        collection = str(hash(settings.SOURCE_URL))
+        output_path = pathlib.Path(settings.OUTPUT_DIR) / collection / str(request.z)
 
         if not output_path.exists():
             return {"tile_count": 0}
@@ -104,6 +93,5 @@ def create_app(args) -> FastAPI:
 if __name__ == "__main__":
     import uvicorn
 
-    args = get_inline_arguments()
-    app = create_app(args)
-    uvicorn.run(app, host=args.host, port=args.port)
+    app = create_app()
+    uvicorn.run(app, host=settings.HOST, port=settings.PORT)

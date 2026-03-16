@@ -9,6 +9,7 @@ class Settings(BaseSettings):
 
     # Server settings
     OUTPUT_DIR: pathlib.Path = pathlib.Path.cwd()
+    SOURCE_URL: str = "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
     HOST: str = "0.0.0.0"
     PORT: int = 8100
 
