@@ -1,4 +1,4 @@
 #!/bin/bash
 
-# Run the application with gunicorn
-gunicorn --bind 0.0.0.0:8000 --workers 4 --timeout 120 "src.main:create_app()"
+# Run the FastAPI application with uvicorn
+uvicorn src.main:create_app --factory --host 0.0.0.0 --port 8000 --workers 64

@@ -13,24 +13,114 @@
     <div class="overlay">
         <h1>OpenLayers Tile Preview</h1>
         <p>Tiles are served through /scrapper/{z}/{x}/{y}</p>
+        <a class="overlay-link" href="/auto">Open Auto Downloader</a>
+    </div>
+    <div class="cache-stats" id="cacheStats" aria-live="polite">
+        <h2>Cache Stats</h2>
+        <p><span class="label">Status:</span> <span id="cacheStatus">-</span></p>
+        <p><span class="label">Hit rate:</span> <span id="cacheHitRate">0.00%</span></p>
+        <p><span class="label">Hits:</span> <span id="cacheHits">0</span></p>
+        <p><span class="label">Misses:</span> <span id="cacheMisses">0</span></p>
+        <p><span class="label">Total:</span> <span id="cacheTotal">0</span></p>
     </div>
     <div id="map" aria-label="Map"></div>
 
     <script src="https://cdn.jsdelivr.net/npm/ol@9.2.4/dist/ol.js"></script>
     <script>
+        const ui = {
+            status: document.getElementById("cacheStatus"),
+            hitRate: document.getElementById("cacheHitRate"),
+            hits: document.getElementById("cacheHits"),
+            misses: document.getElementById("cacheMisses"),
+            total: document.getElementById("cacheTotal")
+        };
+
+        const state = {
+            hits: 0,
+            misses: 0,
+            hitRate: 0,
+            status: "-"
+        };
+
+        function renderStats() {
+            const total = state.hits + state.misses;
+            ui.status.textContent = state.status;
+            ui.hitRate.textContent = `${(state.hitRate * 100).toFixed(2)}%`;
+            ui.hits.textContent = String(state.hits);
+            ui.misses.textContent = String(state.misses);
+            ui.total.textContent = String(total);
+        }
+
+        function updateFromHeaders(headers) {
+            const headerStatus = headers.get("x-cache");
+            const headerHitRate = Number(headers.get("x-cache-hit-rate"));
+            const headerHits = Number(headers.get("x-cache-hits"));
+            const headerMisses = Number(headers.get("x-cache-misses"));
+
+            if (headerStatus) state.status = headerStatus;
+            if (Number.isFinite(headerHitRate)) state.hitRate = headerHitRate;
+            if (Number.isFinite(headerHits)) state.hits = headerHits;
+            if (Number.isFinite(headerMisses)) state.misses = headerMisses;
+
+            renderStats();
+        }
+
+        async function refreshStats() {
+            try {
+                const response = await fetch("/scrapper/cache-stats", { cache: "no-store" });
+                if (!response.ok) return;
+
+                const data = await response.json();
+                if (Number.isFinite(data.hits)) state.hits = data.hits;
+                if (Number.isFinite(data.misses)) state.misses = data.misses;
+                if (Number.isFinite(data.hit_rate)) state.hitRate = data.hit_rate;
+
+                renderStats();
+            } catch (_error) {
+                // Keep previous values if polling fails.
+            }
+        }
+
+        renderStats();
+        refreshStats();
+        setInterval(refreshStats, 3000);
+
         const map = new ol.Map({
             target: "map",
+            controls: ol.control.defaults.defaults({
+                zoom: false
+            }),
             layers: [
                 new ol.layer.Tile({
                     source: new ol.source.XYZ({
                         url: "/scrapper/{z}/{x}/{y}",
                         maxZoom: 21,
-                        crossOrigin: "anonymous"
+                        tileLoadFunction: (tile, src) => {
+                            fetch(src)
+                                .then((response) => {
+                                    if (!response.ok) {
+                                        throw new Error(`Tile request failed with status ${response.status}`);
+                                    }
+
+                                    updateFromHeaders(response.headers);
+                                    return response.blob();
+                                })
+                                .then((blob) => {
+                                    const objectUrl = URL.createObjectURL(blob);
+                                    const image = tile.getImage();
+                                    image.onload = () => URL.revokeObjectURL(objectUrl);
+                                    image.src = objectUrl;
+                                })
+                                .catch(() => {
+                                    state.status = "ERROR";
+                                    renderStats();
+                                });
+                        }
                     })
                 })
             ],
             view: new ol.View({
-                center: ol.proj.fromLonLat([24, 54]),
+                center: ol.proj.fromLonLat([54, 24]),
                 zoom: 8,
                 minZoom: 2,
                 maxZoom: 21
