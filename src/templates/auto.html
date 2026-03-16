@@ -36,6 +36,33 @@
 			<div id="zoomList" class="zoom-list"></div>
 		</section>
 
+		<section class="backoff-box">
+			<h2>404 Backoff</h2>
+			<label class="backoff-toggle">
+				<input id="backoffEnabled" type="checkbox" checked>
+				<span>Slow down on too many 404 responses</span>
+			</label>
+			<div class="backoff-grid">
+				<label>
+					<span>Window</span>
+					<input id="backoffWindow" type="number" min="10" max="200" value="40">
+				</label>
+				<label>
+					<span>404 trigger</span>
+					<input id="backoffThreshold" type="number" min="1" max="200" value="10">
+				</label>
+				<label>
+					<span>Step (ms)</span>
+					<input id="backoffStep" type="number" min="50" max="5000" value="250">
+				</label>
+				<label>
+					<span>Max delay (ms)</span>
+					<input id="backoffMax" type="number" min="100" max="15000" value="2000">
+				</label>
+			</div>
+			<p class="muted backoff-status">Current delay: <strong id="backoffStatus">0ms</strong></p>
+		</section>
+
 		<section class="tool-row">
 			<button id="downloadBtn" type="button">Start Download</button>
 		</section>
@@ -55,6 +82,12 @@
 			drawBtn: document.getElementById("drawBtn"),
 			clearBtn: document.getElementById("clearBtn"),
 			downloadBtn: document.getElementById("downloadBtn"),
+			backoffEnabled: document.getElementById("backoffEnabled"),
+			backoffWindow: document.getElementById("backoffWindow"),
+			backoffThreshold: document.getElementById("backoffThreshold"),
+			backoffStep: document.getElementById("backoffStep"),
+			backoffMax: document.getElementById("backoffMax"),
+			backoffStatus: document.getElementById("backoffStatus"),
 			selectAllZoom: document.getElementById("selectAllZoom"),
 			clearZoom: document.getElementById("clearZoom"),
 			zoomList: document.getElementById("zoomList"),
@@ -111,6 +144,24 @@
 			}
 			ui.responsesText.textContent += `\n${message}`;
 			ui.responsesText.scrollTop = ui.responsesText.scrollHeight;
+		}
+
+		function sleep(ms) {
+			return new Promise((resolve) => setTimeout(resolve, ms));
+		}
+
+		function getBackoffConfig() {
+			return {
+				enabled: ui.backoffEnabled.checked,
+				window: Math.max(10, Number(ui.backoffWindow.value) || 40),
+				threshold: Math.max(1, Number(ui.backoffThreshold.value) || 10),
+				stepMs: Math.max(50, Number(ui.backoffStep.value) || 250),
+				maxDelayMs: Math.max(100, Number(ui.backoffMax.value) || 2000)
+			};
+		}
+
+		function renderBackoffStatus(delayMs) {
+			ui.backoffStatus.textContent = `${delayMs}ms`;
 		}
 
 		function latToTileY(lat, z) {
@@ -179,9 +230,40 @@
 			return response.json();
 		}
 
-		async function downloadTiles(tasks, concurrency = 8) {
+		async function downloadTiles(tasks, backoffConfig, concurrency = 8) {
 			let index = 0;
 			let completed = 0;
+			const recent404 = [];
+			let currentDelayMs = 0;
+
+			function registerStatus(status) {
+				recent404.push(status === 404 ? 1 : 0);
+				if (recent404.length > backoffConfig.window) {
+					recent404.shift();
+				}
+
+				if (!backoffConfig.enabled) {
+					if (currentDelayMs !== 0) {
+						currentDelayMs = 0;
+						renderBackoffStatus(currentDelayMs);
+					}
+					return;
+				}
+
+				const count404 = recent404.reduce((acc, value) => acc + value, 0);
+				const previousDelay = currentDelayMs;
+
+				if (count404 >= backoffConfig.threshold) {
+					currentDelayMs = Math.min(currentDelayMs + backoffConfig.stepMs, backoffConfig.maxDelayMs);
+				} else if (count404 <= Math.floor(backoffConfig.threshold / 2)) {
+					currentDelayMs = Math.max(currentDelayMs - backoffConfig.stepMs, 0);
+				}
+
+				if (previousDelay !== currentDelayMs) {
+					renderBackoffStatus(currentDelayMs);
+					appendResponse(`Backoff delay updated: ${currentDelayMs}ms (404 in window: ${count404}/${recent404.length})`);
+				}
+			}
 
 			async function worker() {
 				while (index < tasks.length) {
@@ -189,12 +271,18 @@
 					index += 1;
 
 					const path = `/scrapper/${task.z}/${task.x}/${task.y}`;
+					if (currentDelayMs > 0) {
+						await sleep(currentDelayMs);
+					}
+
 					try {
 						const response = await fetch(path);
+						registerStatus(response.status);
 						if (!response.ok) {
 							appendResponse(`FAILED ${path} -> ${response.status}`);
 						}
 					} catch (_error) {
+						registerStatus(0);
 						appendResponse(`FAILED ${path} -> network error`);
 					}
 
@@ -280,7 +368,12 @@
 			}
 
 			ui.downloadBtn.disabled = true;
+			const backoffConfig = getBackoffConfig();
+			renderBackoffStatus(0);
 			appendResponse(`Starting download for zooms: ${zoomLevels.join(", ")}`);
+			appendResponse(
+				`404 backoff: ${backoffConfig.enabled ? "ON" : "OFF"}, window=${backoffConfig.window}, trigger=${backoffConfig.threshold}, step=${backoffConfig.stepMs}ms, max=${backoffConfig.maxDelayMs}ms`
+			);
 
 			try {
 				for (const z of zoomLevels) {
@@ -294,7 +387,7 @@
 				}
 				appendResponse(`Planned tile requests: ${allTasks.length}`);
 
-				await downloadTiles(allTasks, 8);
+				await downloadTiles(allTasks, backoffConfig, 8);
 				appendResponse("Download complete.");
 
 				for (const z of zoomLevels) {
