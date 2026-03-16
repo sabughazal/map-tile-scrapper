@@ -1,3 +1,4 @@
+import sys
 import pathlib
 import argparse
 import requests
@@ -8,21 +9,39 @@ from fastapi.responses import HTMLResponse
 from fastapi import HTTPException, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+
+current_dir = pathlib.Path(__file__).parent
+sys.path.append(str(current_dir.parent))
+
+from src.config import settings
 
 
 
-BASE_DIR = pathlib.Path(__file__).resolve().parent
+BASE_DIR = pathlib.Path(__file__).parent.resolve()
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
 DEFAULT_SOURCE_URL = "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
 
 
+class Extent(BaseModel):
+    minX: float
+    minY: float
+    maxX: float
+    maxY: float
+
+
+class TileCountRequest(BaseModel):
+    extent: Extent
+    z: int
+
+
 def get_inline_arguments():
     parser = argparse.ArgumentParser(description="Map Tile Scrapper")
     parser.add_argument("--source-url", type=str, default=DEFAULT_SOURCE_URL, help="URL template for the map tiles")
-    parser.add_argument("--output-dir", type=str, default=str(BASE_DIR / "data"), help="Directory to save the scraped tiles")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to run the server on")
-    parser.add_argument("--port", type=int, default=8000, help="Port to run the server on")
+    parser.add_argument("--output-dir", type=str, default=str(settings.OUTPUT_DIR), help="Directory to save the scraped tiles")
+    parser.add_argument("--host", type=str, default=settings.HOST, help="Host to run the server on")
+    parser.add_argument("--port", type=int, default=settings.PORT, help="Port to run the server on")
     return parser.parse_args()
 
 
@@ -66,6 +85,18 @@ def create_app(args) -> FastAPI:
             content_type = "image/png"
 
         return Response(content=response.content, media_type=content_type)
+
+
+    @app.post("/scrapper/get-tile-count")
+    async def get_tile_count(request: TileCountRequest):
+        collection = str(hash(args.source_url))
+        output_path = pathlib.Path(args.output_dir) / collection / str(request.z)
+
+        if not output_path.exists():
+            return {"tile_count": 0}
+
+        tile_count = sum(1 for _ in output_path.rglob("*.png"))
+        return {"tile_count": tile_count}
 
     return app
 
