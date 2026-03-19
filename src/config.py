@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     LOG_LEVEL: str = "INFO"
 
+    # GeoTIFF Export settings
+    GEOTIFF_MAX_WORKERS: Optional[int] = None  # None = auto (min 2, max 8 based on CPU count)
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

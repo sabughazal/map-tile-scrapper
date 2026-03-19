@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>GeoTIFF Export Planner</title>
+	<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@9.2.4/ol.css">
+	<link rel="stylesheet" href="/static/css/geotiff.css">
+	<link rel="shortcut icon" href="/static/favicon.ico" type="image/x-icon">
+</head>
+<body>
+	<div id="map" aria-label="Map"></div>
+
+	<aside class="side-panel">
+		<h1>GeoTIFF Export Planner</h1>
+		<p class="muted">Draw a rectangle, select a zoom level, and preview the tile matrix as an SVG grid.</p>
+		<nav class="page-nav" aria-label="Page navigation">
+			<a class="page-link" href="/">Map Preview</a>
+			<a class="page-link" href="/auto">Auto Downloader</a>
+			<a class="page-link current" href="/geotiff">GeoTIFF Export</a>
+		</nav>
+
+		<section class="tool-row">
+			<button id="drawBtn" type="button">Draw Rectangle</button>
+			<button id="clearBtn" type="button" class="secondary">Clear</button>
+		</section>
+
+		<section class="panel-block">
+			<h2>Selected Extent</h2>
+			<pre id="extentText">No area selected</pre>
+		</section>
+
+		<section class="panel-block">
+			<h2>Zoom Level</h2>
+			<div class="zoom-row">
+				<span>7</span>
+				<input id="zoomSlider" type="range" min="7" max="20" step="1" value="10" aria-label="Zoom level">
+				<span class="zoom-value" id="zoomValue">10</span>
+			</div>
+			<p class="result-line">Rows: <strong id="rowsValue">-</strong> | Cols: <strong id="colsValue">-</strong></p>
+		</section>
+
+		<section class="panel-block">
+			<h2>Tile Matrix Preview</h2>
+			<div id="gridWrap" class="svg-wrap empty">Draw an extent to get started.</div>
+			<p class="result-line">Done: <strong id="doneValue">0</strong> | Failed: <strong id="failedValue">0</strong> | Total: <strong id="totalValue">0</strong></p>
+			<div id="statusText" class="status" aria-live="polite"></div>
+		</section>
+
+		<button id="exportBtn" type="button" class="export-button-full">Start Export</button>
+	</aside>
+
+	<script src="https://cdn.jsdelivr.net/npm/ol@9.2.4/dist/ol.js"></script>
+	<script>
+		const MAX_GRID_HEIGHT = 320;
+
+		const POLL_INTERVAL_MS = 500;
+
+		const ui = {
+			drawBtn: document.getElementById("drawBtn"),
+			clearBtn: document.getElementById("clearBtn"),
+			exportBtn: document.getElementById("exportBtn"),
+			extentText: document.getElementById("extentText"),
+			zoomSlider: document.getElementById("zoomSlider"),
+			zoomValue: document.getElementById("zoomValue"),
+			rowsValue: document.getElementById("rowsValue"),
+			colsValue: document.getElementById("colsValue"),
+			doneValue: document.getElementById("doneValue"),
+			failedValue: document.getElementById("failedValue"),
+			totalValue: document.getElementById("totalValue"),
+			gridWrap: document.getElementById("gridWrap"),
+			statusText: document.getElementById("statusText")
+		};
+
+		const drawSource = new ol.source.Vector();
+		const drawLayer = new ol.layer.Vector({
+			source: drawSource,
+			style: new ol.style.Style({
+				stroke: new ol.style.Stroke({ color: "#52d8b5", width: 2 }),
+				fill: new ol.style.Fill({ color: "rgba(82, 216, 181, 0.14)" })
+			})
+		});
+
+		const drawInteraction = new ol.interaction.Draw({
+			source: drawSource,
+			type: "Circle",
+			geometryFunction: ol.interaction.Draw.createBox()
+		});
+		drawInteraction.setActive(false);
+
+		const map = new ol.Map({
+			target: "map",
+			controls: ol.control.defaults.defaults({
+				zoom: false
+			}),
+			layers: [
+				new ol.layer.Tile({
+					source: new ol.source.XYZ({
+						url: "/scrapper/{z}/{x}/{y}",
+						maxZoom: 21
+					})
+				}),
+				drawLayer
+			],
+			view: new ol.View({
+				center: ol.proj.fromLonLat([54, 24]),
+				zoom: 8,
+				minZoom: 2,
+				maxZoom: 21
+			})
+		});
+		map.addInteraction(drawInteraction);
+
+		let selectedGeometry = null;
+		let lastGrid = null;
+		let activeJob = null;
+		let pollHandle = null;
+		let pollBusy = false;
+
+		function setStatus(message, tone = "") {
+			ui.statusText.textContent = message;
+			ui.statusText.className = tone ? `status ${tone}` : "status";
+		}
+
+		function getSelectedExtent() {
+			if (!selectedGeometry) {
+				return null;
+			}
+
+			const [minX, minY, maxX, maxY] = selectedGeometry.getExtent();
+			const lowerLeft = ol.proj.toLonLat([minX, minY]);
+			const upperRight = ol.proj.toLonLat([maxX, maxY]);
+
+			return {
+				minX: lowerLeft[0],
+				minY: lowerLeft[1],
+				maxX: upperRight[0],
+				maxY: upperRight[1]
+			};
+		}
+
+		function updateCounters(done, failed, total) {
+			ui.doneValue.textContent = String(done);
+			ui.failedValue.textContent = String(failed);
+			ui.totalValue.textContent = String(total);
+		}
+
+		function resetExportUi() {
+			updateCounters(0, 0, 0);
+		}
+
+		function clearGridPreview(message = "Draw an extent and generate a grid preview.") {
+			ui.rowsValue.textContent = "-";
+			ui.colsValue.textContent = "-";
+			ui.gridWrap.className = "svg-wrap empty";
+			ui.gridWrap.textContent = message;
+			lastGrid = null;
+			resetExportUi();
+		}
+
+		function paintCell(index, fillColor) {
+			const rect = ui.gridWrap.querySelector(`rect[data-idx="${index}"]`);
+			if (!rect) {
+				return;
+			}
+			rect.setAttribute("fill", fillColor);
+		}
+
+		function renderGrid(rows, cols) {
+			const panelWidth = ui.gridWrap.clientWidth - 14;
+			const safeRows = Math.max(1, rows);
+			const safeCols = Math.max(1, cols);
+			const cellSize = Math.max(1, Math.min(panelWidth / safeCols, MAX_GRID_HEIGHT / safeRows));
+			const svgWidth = safeCols * cellSize;
+			const svgHeight = safeRows * cellSize;
+
+			let rects = "";
+			for (let row = 0; row < safeRows; row += 1) {
+				for (let col = 0; col < safeCols; col += 1) {
+					const index = (row * safeCols) + col;
+					rects += `<rect data-idx="${index}" x="${col}" y="${row}" width="1" height="1" fill="var(--grid-fill)" stroke="var(--grid-stroke)" stroke-width="0.04" />`;
+				}
+			}
+
+			ui.gridWrap.className = "svg-wrap";
+			ui.gridWrap.innerHTML = `
+				<svg id="gridSvg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${safeCols} ${safeRows}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tile matrix ${safeRows} rows by ${safeCols} cols">
+					${rects}
+				</svg>
+			`;
+
+			lastGrid = { rows: safeRows, cols: safeCols };
+			resetExportUi();
+		}
+
+		function buildExportUrl(extent, zoom) {
+			const params = new URLSearchParams({
+				z: String(zoom),
+				"extent.minX": String(extent.minX),
+				"extent.minY": String(extent.minY),
+				"extent.maxX": String(extent.maxX),
+				"extent.maxY": String(extent.maxY)
+			});
+			return `/scrapper/geotiff-export?${params.toString()}`;
+		}
+
+		async function requestGrid() {
+			const extent = getSelectedExtent();
+			if (!extent) {
+				setStatus("Draw an area first.", "error");
+				clearGridPreview();
+				return null;
+			}
+
+			const zoom = Number(ui.zoomSlider.value);
+			ui.previewBtn.disabled = true;
+			setStatus("Calculating tile matrix...", "");
+
+			try {
+				const url = buildExportUrl(extent, zoom);
+				const response = await fetch(url, { method: "GET" });
+				if (!response.ok) {
+					throw new Error(`Request failed: ${response.status}`);
+				}
+
+				const data = await response.json();
+				const rows = Number(data.rows);
+				const cols = Number(data.cols);
+
+				if (!Number.isFinite(rows) || !Number.isFinite(cols) || rows <= 0 || cols <= 0) {
+					throw new Error("Endpoint returned invalid rows/cols values.");
+				}
+
+				ui.rowsValue.textContent = String(rows);
+				ui.colsValue.textContent = String(cols);
+				renderGrid(rows, cols);
+				setStatus(`Generated ${rows} x ${cols} grid for zoom ${zoom}.`, "success");
+				return { rows, cols };
+			} catch (error) {
+				clearGridPreview("Failed to generate grid preview.");
+				setStatus(error.message, "error");
+				return null;
+			} finally {
+				ui.previewBtn.disabled = false;
+			}
+		}
+
+		async function cancelActiveJob(silent = true) {
+			if (!activeJob) {
+				return;
+			}
+
+			const jobId = activeJob.jobId;
+			activeJob = null;
+			if (pollHandle) {
+				clearInterval(pollHandle);
+				pollHandle = null;
+			}
+
+			try {
+				await fetch(`/scrapper/geotiff-export/cancel?job_id=${encodeURIComponent(jobId)}`, {
+					method: "POST",
+					keepalive: true
+				});
+			} catch (_error) {
+				if (!silent) {
+					setStatus("Failed to cancel running export.", "error");
+				}
+			}
+		}
+
+		async function pollJobStatus() {
+			if (!activeJob || pollBusy) {
+				return;
+			}
+
+			pollBusy = true;
+			try {
+				const statusUrl = `/scrapper/geotiff-export/status?job_id=${encodeURIComponent(activeJob.jobId)}&last_seq=${activeJob.lastSeq}`;
+				const response = await fetch(statusUrl, { cache: "no-store" });
+				if (!response.ok) {
+					throw new Error(`Status request failed: ${response.status}`);
+				}
+
+				const data = await response.json();
+				activeJob.lastSeq = Number(data.last_seq) || activeJob.lastSeq;
+				updateCounters(Number(data.completed || 0), Number(data.failed || 0), Number(data.total || 0));
+
+				for (const event of data.events || []) {
+					if (event.type !== "tile") {
+						continue;
+					}
+					if (event.status === "downloaded" || event.status === "cached") {
+						paintCell(event.index, "#34d399");
+					} else if (event.status === "failed") {
+						paintCell(event.index, "#f87171");
+					} else if (event.status === "retrying") {
+						paintCell(event.index, "#fbbf24");
+					}
+				}
+
+				if (data.state === "completed") {
+					if (pollHandle) {
+						clearInterval(pollHandle);
+						pollHandle = null;
+					}
+					ui.exportBtn.disabled = false;
+					setStatus("Export finished. GeoTIFF is ready in the output directory.", "success");
+					activeJob = null;
+					return;
+				}
+
+				if (data.state === "failed" || data.state === "cancelled") {
+					if (pollHandle) {
+						clearInterval(pollHandle);
+						pollHandle = null;
+					}
+					ui.exportBtn.disabled = false;
+					setStatus(data.error || `Export ${data.state}.`, "error");
+					activeJob = null;
+					return;
+				}
+
+				setStatus(`Export in progress... ${data.completed}/${data.total} tiles complete.`, "");
+			} catch (error) {
+				setStatus(error.message, "error");
+			} finally {
+				pollBusy = false;
+			}
+		}
+
+		async function startExport() {
+			const extent = getSelectedExtent();
+			if (!extent) {
+				setStatus("Draw an area first.", "error");
+				return;
+			}
+
+			if (activeJob) {
+				await cancelActiveJob(true);
+			}
+
+			ui.exportBtn.disabled = true;
+			setStatus("Starting export job...", "");
+
+			try {
+				const zoom = Number(ui.zoomSlider.value);
+				const response = await fetch("/scrapper/geotiff-export/start", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ extent, z: zoom })
+				});
+				if (!response.ok) {
+					throw new Error(`Start export failed: ${response.status}`);
+				}
+
+				const data = await response.json();
+				renderGrid(Number(data.rows), Number(data.cols));
+				ui.rowsValue.textContent = String(data.rows);
+				ui.colsValue.textContent = String(data.cols);
+				updateCounters(0, 0, Number(data.total || 0));
+
+				activeJob = {
+					jobId: data.job_id,
+					lastSeq: 0
+				};
+
+				pollHandle = setInterval(() => {
+					pollJobStatus();
+				}, POLL_INTERVAL_MS);
+				await pollJobStatus();
+			} catch (error) {
+				ui.exportBtn.disabled = false;
+				setStatus(error.message, "error");
+			}
+		}
+
+		drawInteraction.on("drawstart", () => {
+			drawSource.clear();
+			selectedGeometry = null;
+			ui.extentText.textContent = "Drawing rectangle...";
+			clearGridPreview();
+			setStatus("", "");
+		});
+
+		drawInteraction.on("drawend", (event) => {
+			selectedGeometry = event.feature.getGeometry();
+			drawInteraction.setActive(false);
+			const extent = getSelectedExtent();
+			ui.extentText.textContent = JSON.stringify(extent, null, 2);
+			setStatus("Rectangle selected. Click 'Start Export' to begin.", "");
+		});
+
+		ui.drawBtn.addEventListener("click", async () => {
+			await cancelActiveJob(true);
+			drawSource.clear();
+			selectedGeometry = null;
+			ui.extentText.textContent = "Draw rectangle on map...";
+			drawInteraction.setActive(true);
+			clearGridPreview();
+			setStatus("", "");
+		});
+
+		ui.clearBtn.addEventListener("click", async () => {
+			await cancelActiveJob(true);
+			drawSource.clear();
+			selectedGeometry = null;
+			ui.extentText.textContent = "No area selected";
+			clearGridPreview();
+			setStatus("Selection cleared.", "");
+		});
+
+		ui.zoomSlider.addEventListener("input", () => {
+			ui.zoomValue.textContent = ui.zoomSlider.value;
+			if (lastGrid) {
+				setStatus("Zoom changed. Generate grid again before exporting.", "");
+			}
+		});
+
+		ui.exportBtn.addEventListener("click", () => {
+			startExport();
+		});
+
+		window.addEventListener("beforeunload", () => {
+			if (!activeJob) {
+				return;
+			}
+			navigator.sendBeacon(`/scrapper/geotiff-export/cancel?job_id=${encodeURIComponent(activeJob.jobId)}`);
+		});
+	</script>
+</body>
+</html>

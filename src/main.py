@@ -3,18 +3,20 @@ import hashlib
 import pathlib
 import requests
 from typing import Optional
+from pydantic import BaseModel
+from fastapi import FastAPI, Query, Request
 
-from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi import HTTPException, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+
 
 current_dir = pathlib.Path(__file__).parent
 sys.path.append(str(current_dir.parent))
 
 from src.config import settings
+from src.geotiff_utils import GeotiffExportManager
 
 
 
@@ -35,11 +37,23 @@ class TileCountRequest(BaseModel):
     z: int
 
 
+class GeotiffExportRequest(BaseModel):
+    extent: Extent
+    z: int
+
+
 def create_app() -> FastAPI:
 
     app = FastAPI(title="Map Tile Scrapper")
     cache_hits = 0
     cache_misses = 0
+    geotiff_manager = GeotiffExportManager(
+        output_dir=settings.OUTPUT_DIR,
+        source_url=settings.SOURCE_URL,
+        max_retries=3,
+        disconnect_timeout_sec=5.0,
+        max_download_workers=settings.GEOTIFF_MAX_WORKERS,
+    )
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -55,6 +69,11 @@ def create_app() -> FastAPI:
     @app.get("/auto", response_class=HTMLResponse)
     async def auto(request: Request) -> HTMLResponse:
         return templates.TemplateResponse("auto.html", {"request": request})
+
+
+    @app.get("/geotiff", response_class=HTMLResponse)
+    async def geotiff(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse("geotiff.html", {"request": request})
 
 
     @app.get("/scrapper/{z}/{x}/{y}")
@@ -132,6 +151,65 @@ def create_app() -> FastAPI:
 
         tile_count = sum(1 for _ in output_path.rglob("*.png"))
         return {"tile_count": tile_count}
+
+
+    @app.get("/scrapper/geotiff-export")
+    async def geotiff_export(
+        z: int = Query(..., ge=0, le=24),
+        min_x: float = Query(..., alias="extent.minX"),
+        min_y: float = Query(..., alias="extent.minY"),
+        max_x: float = Query(..., alias="extent.maxX"),
+        max_y: float = Query(..., alias="extent.maxY"),
+    ):
+        grid = geotiff_manager.estimate_grid(
+            z=z,
+            min_x=min_x,
+            min_y=min_y,
+            max_x=max_x,
+            max_y=max_y,
+        )
+        return grid
+
+
+    @app.post("/scrapper/geotiff-export/start")
+    async def geotiff_export_start(request: GeotiffExportRequest):
+        job = geotiff_manager.start_job(
+            z=request.z,
+            min_x=request.extent.minX,
+            min_y=request.extent.minY,
+            max_x=request.extent.maxX,
+            max_y=request.extent.maxY,
+        )
+        return job
+
+
+    @app.get("/scrapper/geotiff-export/status")
+    async def geotiff_export_status(job_id: str, last_seq: int = 0):
+        status = geotiff_manager.poll_status(job_id=job_id, last_seq=last_seq)
+        if status is None:
+            raise HTTPException(status_code=404, detail="GeoTIFF export job not found")
+        return status
+
+
+    @app.post("/scrapper/geotiff-export/cancel")
+    async def geotiff_export_cancel(job_id: str):
+        cancelled = geotiff_manager.cancel_job(job_id)
+        if not cancelled:
+            raise HTTPException(status_code=404, detail="GeoTIFF export job not found")
+        return {"cancelled": True, "job_id": job_id}
+
+
+    @app.get("/scrapper/geotiff-file/{job_id}")
+    async def geotiff_export_file(job_id: str):
+        geotiff_path = geotiff_manager.get_geotiff_path(job_id)
+        if geotiff_path is None or not geotiff_path.is_file():
+            raise HTTPException(status_code=404, detail="GeoTIFF file not found")
+
+        return FileResponse(
+            path=geotiff_path,
+            media_type="image/tiff",
+            filename=geotiff_path.name,
+        )
 
     return app
 

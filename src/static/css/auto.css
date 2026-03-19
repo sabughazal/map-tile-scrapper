@@ -31,7 +31,7 @@ body {
     top: 1rem;
     right: 1rem;
     z-index: 12;
-    width: min(360px, calc(100vw - 2rem));
+    width: min(420px, calc(100vw - 2rem));
     max-height: calc(100vh - 2rem);
     overflow: auto;
     border-radius: 14px;
@@ -56,6 +56,36 @@ h2 {
     margin: 0.4rem 0 1rem;
     font-size: 0.84rem;
     color: var(--muted);
+}
+
+.page-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin: 0 0 0.9rem;
+}
+
+.page-link {
+    display: inline-block;
+    border-radius: 8px;
+    padding: 0.4rem 0.62rem;
+    text-decoration: none;
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--text);
+    background: #1e3348;
+    transition: transform 120ms ease, filter 120ms ease;
+}
+
+.page-link:hover {
+    transform: translateY(-1px);
+    filter: brightness(1.06);
+}
+
+.page-link.current {
+    pointer-events: none;
+    color: #052430;
+    background: var(--accent);
 }
 
 .tool-row {

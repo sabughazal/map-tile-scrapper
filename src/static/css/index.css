@@ -51,9 +51,15 @@ body {
 	color: var(--muted);
 }
 
+.overlay-nav {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.4rem;
+	margin-top: 0.55rem;
+}
+
 .overlay-link {
 	display: inline-block;
-	margin-top: 0.55rem;
 	padding: 0.42rem 0.62rem;
 	border-radius: 8px;
 	text-decoration: none;
@@ -67,6 +73,11 @@ body {
 .overlay-link:hover {
 	transform: translateY(-1px);
 	filter: brightness(1.06);
+}
+
+.overlay-link.current {
+	pointer-events: none;
+	background: #a5f3fc;
 }
 
 .cache-stats {
