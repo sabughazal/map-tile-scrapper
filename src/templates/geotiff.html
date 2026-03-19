@@ -11,14 +11,14 @@
 <body>
 	<div id="map" aria-label="Map"></div>
 
+	<nav class="page-nav" aria-label="Page navigation">
+		<a class="page-link" href="/">Map Preview</a>
+		<a class="page-link" href="/auto">Auto Downloader</a>
+		<a class="page-link current" href="/geotiff">GeoTIFF Export</a>
+	</nav>
 	<aside class="side-panel">
 		<h1>GeoTIFF Export Planner</h1>
 		<p class="muted">Draw a rectangle, select a zoom level, and preview the tile matrix as an SVG grid.</p>
-		<nav class="page-nav" aria-label="Page navigation">
-			<a class="page-link" href="/">Map Preview</a>
-			<a class="page-link" href="/auto">Auto Downloader</a>
-			<a class="page-link current" href="/geotiff">GeoTIFF Export</a>
-		</nav>
 
 		<section class="tool-row">
 			<button id="drawBtn" type="button">Draw Rectangle</button>
