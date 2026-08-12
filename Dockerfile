@@ -25,4 +25,4 @@ USER appuser
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "gunicorn 'src.main:create_app()' -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-4} -b 0.0.0.0:8000"]
+CMD ["sh", "-c", "gunicorn 'src.main:create_app()' -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-1} -b 0.0.0.0:8000"]

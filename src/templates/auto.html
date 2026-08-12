@@ -68,12 +68,23 @@
 			<p class="muted backoff-status">Current delay: <strong id="backoffStatus">0ms</strong></p>
 		</section>
 
-		<section class="tool-row">
+		<section class="tool-row job-controls">
 			<button id="downloadBtn" type="button">Start Download</button>
+			<button id="pauseBtn" type="button" class="secondary" disabled>Pause</button>
+			<button id="cancelBtn" type="button" class="secondary" disabled>Cancel</button>
+		</section>
+
+		<section class="progress-box">
+			<div class="section-head">
+				<h2>Progress</h2>
+				<span id="stateLabel" class="state-label">Idle</span>
+			</div>
+			<div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+			<p class="muted"><strong id="progressText">0 / 0</strong> tiles &middot; <span id="failedText">0 failed</span></p>
 		</section>
 
 		<section class="responses-box">
-			<h2>Tile Counter Responses</h2>
+			<h2>Activity Log</h2>
 			<pre id="responsesText">No requests yet</pre>
 		</section>
 	</aside>
@@ -82,11 +93,18 @@
 	<script>
 		const MAX_ZOOM = 21;
 		const MIN_ZOOM = 2;
+		const LIST_MIN_ZOOM = 0;
 
 		const ui = {
 			drawBtn: document.getElementById("drawBtn"),
 			clearBtn: document.getElementById("clearBtn"),
 			downloadBtn: document.getElementById("downloadBtn"),
+			pauseBtn: document.getElementById("pauseBtn"),
+			cancelBtn: document.getElementById("cancelBtn"),
+			stateLabel: document.getElementById("stateLabel"),
+			progressFill: document.getElementById("progressFill"),
+			progressText: document.getElementById("progressText"),
+			failedText: document.getElementById("failedText"),
 			backoffEnabled: document.getElementById("backoffEnabled"),
 			backoffWindow: document.getElementById("backoffWindow"),
 			backoffThreshold: document.getElementById("backoffThreshold"),
@@ -151,10 +169,6 @@
 			ui.responsesText.scrollTop = ui.responsesText.scrollHeight;
 		}
 
-		function sleep(ms) {
-			return new Promise((resolve) => setTimeout(resolve, ms));
-		}
-
 		function getBackoffConfig() {
 			return {
 				enabled: ui.backoffEnabled.checked,
@@ -167,18 +181,6 @@
 
 		function renderBackoffStatus(delayMs) {
 			ui.backoffStatus.textContent = `${delayMs}ms`;
-		}
-
-		function latToTileY(lat, z) {
-			const latRad = (Math.max(-85.05112878, Math.min(85.05112878, lat)) * Math.PI) / 180;
-			const n = 2 ** z;
-			return Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n);
-		}
-
-		function lonToTileX(lon, z) {
-			const normalizedLon = Math.max(-180, Math.min(180, lon));
-			const n = 2 ** z;
-			return Math.floor(((normalizedLon + 180) / 360) * n);
 		}
 
 		function getSelectedExtent() {
@@ -203,107 +205,119 @@
 			return Array.from(checkboxes).map((box) => Number(box.value));
 		}
 
-		function tileTasksForExtent(extent, z) {
-			const xMinRaw = lonToTileX(extent.minX, z);
-			const xMaxRaw = lonToTileX(extent.maxX, z);
-			const yMinRaw = latToTileY(extent.maxY, z);
-			const yMaxRaw = latToTileY(extent.minY, z);
+		const POLL_INTERVAL_MS = 500;
+		let activeJob = null;
+		let pollHandle = null;
+		let pollBusy = false;
 
-			const xMin = Math.min(xMinRaw, xMaxRaw);
-			const xMax = Math.max(xMinRaw, xMaxRaw);
-			const yMin = Math.min(yMinRaw, yMaxRaw);
-			const yMax = Math.max(yMinRaw, yMaxRaw);
-
-			const tasks = [];
-			for (let x = xMin; x <= xMax; x += 1) {
-				for (let y = yMin; y <= yMax; y += 1) {
-					tasks.push({ z, x, y });
-				}
-			}
-			return tasks;
+		function setState(label, cls) {
+			ui.stateLabel.textContent = label;
+			ui.stateLabel.className = `state-label ${cls || ""}`.trim();
 		}
 
-		async function fetchTileCount(extent, z) {
-			const response = await fetch("/scrapper/get-tile-count", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ extent, z })
-			});
-			if (!response.ok) {
-				throw new Error(`Tile count failed for z=${z} with ${response.status}`);
-			}
-			return response.json();
+		function renderProgress(data) {
+			const total = Number(data.total) || 0;
+			const completed = Number(data.completed) || 0;
+			const failed = Number(data.failed) || 0;
+			const done = completed + failed;
+			const pct = total ? Math.round((done / total) * 100) : 0;
+			ui.progressFill.style.width = `${pct}%`;
+			ui.progressText.textContent = `${done} / ${total}`;
+			ui.failedText.textContent = `${failed} failed`;
 		}
 
-		async function downloadTiles(tasks, backoffConfig, concurrency = 8) {
-			let index = 0;
-			let completed = 0;
-			const recent404 = [];
-			let currentDelayMs = 0;
-
-			function registerStatus(status) {
-				recent404.push(status === 404 ? 1 : 0);
-				if (recent404.length > backoffConfig.window) {
-					recent404.shift();
+		function applyEvents(events) {
+			for (const event of events || []) {
+				if (event.type === "backoff") {
+					renderBackoffStatus(event.delay_ms);
+					appendResponse(`Backoff delay: ${event.delay_ms}ms`);
+				} else if (event.type === "job") {
+					appendResponse(`Job ${event.status}`);
+				} else if (event.type === "tile" && event.status === "failed") {
+					appendResponse(`FAILED z${event.z}/${event.x}/${event.y} -> ${event.error || "error"}`);
 				}
+			}
+		}
 
-				if (!backoffConfig.enabled) {
-					if (currentDelayMs !== 0) {
-						currentDelayMs = 0;
-						renderBackoffStatus(currentDelayMs);
-					}
+		function setControls(state) {
+			const active = state === "queued" || state === "running" || state === "paused";
+			ui.downloadBtn.disabled = active;
+			ui.pauseBtn.disabled = !active;
+			ui.cancelBtn.disabled = !active;
+			ui.pauseBtn.textContent = state === "paused" ? "Resume" : "Pause";
+		}
+
+		function stopPolling() {
+			if (pollHandle) {
+				clearInterval(pollHandle);
+				pollHandle = null;
+			}
+		}
+
+		async function pollJobStatus() {
+			if (!activeJob || pollBusy) {
+				return;
+			}
+			pollBusy = true;
+			try {
+				const url = `/scrapper/auto-download/status?job_id=${encodeURIComponent(activeJob.jobId)}&last_seq=${activeJob.lastSeq}`;
+				const response = await fetch(url);
+				if (!response.ok) {
+					stopPolling();
 					return;
 				}
+				const data = await response.json();
+				activeJob.lastSeq = Number(data.last_seq) || activeJob.lastSeq;
+				renderProgress(data);
+				applyEvents(data.events);
+				setControls(data.state);
+				renderBackoffStatus(data.current_delay_ms || 0);
 
-				const count404 = recent404.reduce((acc, value) => acc + value, 0);
-				const previousDelay = currentDelayMs;
-
-				if (count404 >= backoffConfig.threshold) {
-					currentDelayMs = Math.min(currentDelayMs + backoffConfig.stepMs, backoffConfig.maxDelayMs);
-				} else if (count404 <= Math.floor(backoffConfig.threshold / 2)) {
-					currentDelayMs = Math.max(currentDelayMs - backoffConfig.stepMs, 0);
+				if (data.state === "completed" || data.state === "cancelled" || data.state === "failed") {
+					if (data.error) {
+						appendResponse(data.error);
+					}
+					stopPolling();
+					setState(data.state.charAt(0).toUpperCase() + data.state.slice(1), data.state);
+					activeJob = null;
+				} else if (data.state === "paused") {
+					setState("Paused", "paused");
+				} else {
+					setState("Downloading...", "running");
 				}
-
-				if (previousDelay !== currentDelayMs) {
-					renderBackoffStatus(currentDelayMs);
-					appendResponse(`Backoff delay updated: ${currentDelayMs}ms (404 in window: ${count404}/${recent404.length})`);
-				}
+			} catch (error) {
+				appendResponse(`Status error: ${error.message}`);
+			} finally {
+				pollBusy = false;
 			}
+		}
 
-			async function worker() {
-				while (index < tasks.length) {
-					const task = tasks[index];
-					index += 1;
+		function attachJob(jobId, lastSeq) {
+			activeJob = { jobId, lastSeq: Number(lastSeq) || 0 };
+			stopPolling();
+			pollHandle = setInterval(pollJobStatus, POLL_INTERVAL_MS);
+			pollJobStatus();
+		}
 
-					const path = `/scrapper/${task.z}/${task.x}/${task.y}`;
-					if (currentDelayMs > 0) {
-						await sleep(currentDelayMs);
-					}
-
-					try {
-						const response = await fetch(path);
-						registerStatus(response.status);
-						if (!response.ok) {
-							appendResponse(`FAILED ${path} -> ${response.status}`);
-						}
-					} catch (_error) {
-						registerStatus(0);
-						appendResponse(`FAILED ${path} -> network error`);
-					}
-
-					completed += 1;
-					if (completed % 25 === 0 || completed === tasks.length) {
-						appendResponse(`Progress: ${completed}/${tasks.length}`);
-					}
+		async function reattachActiveJob() {
+			try {
+				const response = await fetch("/scrapper/auto-download/active");
+				if (!response.ok) {
+					return;
 				}
+				const data = await response.json();
+				if (data && data.job_id) {
+					appendResponse(`Reattached to job ${data.job_id} (${data.state}).`);
+					renderProgress(data);
+					attachJob(data.job_id, data.last_seq || 0);
+				}
+			} catch (_error) {
+				/* no active job to reattach */
 			}
-
-			const workers = Array.from({ length: concurrency }, () => worker());
-			await Promise.all(workers);
 		}
 
 		function populateZoomLevels() {
-			for (let z = MIN_ZOOM; z <= MAX_ZOOM; z += 1) {
+			for (let z = LIST_MIN_ZOOM; z <= MAX_ZOOM; z += 1) {
 				const row = document.createElement("label");
 				row.className = "zoom-item";
 
@@ -372,41 +386,73 @@
 				return;
 			}
 
+			const backoff = getBackoffConfig();
 			ui.downloadBtn.disabled = true;
-			const backoffConfig = getBackoffConfig();
 			renderBackoffStatus(0);
-			appendResponse(`Starting download for zooms: ${zoomLevels.join(", ")}`);
-			appendResponse(
-				`404 backoff: ${backoffConfig.enabled ? "ON" : "OFF"}, window=${backoffConfig.window}, trigger=${backoffConfig.threshold}, step=${backoffConfig.stepMs}ms, max=${backoffConfig.maxDelayMs}ms`
-			);
+			appendResponse(`Starting job for zooms: ${zoomLevels.join(", ")}`);
 
 			try {
-				for (const z of zoomLevels) {
-					const before = await fetchTileCount(extent, z);
-					appendResponse(`z=${z} before: ${JSON.stringify(before)}`);
+				const response = await fetch("/scrapper/auto-download/start", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						extent,
+						zoom_levels: zoomLevels,
+						backoff: {
+							enabled: backoff.enabled,
+							window: backoff.window,
+							threshold: backoff.threshold,
+							step_ms: backoff.stepMs,
+							max_delay_ms: backoff.maxDelayMs
+						}
+					})
+				});
+
+				if (!response.ok) {
+					const err = await response.json().catch(() => ({}));
+					appendResponse(err.detail || `Failed to start (${response.status}).`);
+					ui.downloadBtn.disabled = false;
+					return;
 				}
 
-				const allTasks = [];
-				for (const z of zoomLevels) {
-					allTasks.push(...tileTasksForExtent(extent, z));
-				}
-				appendResponse(`Planned tile requests: ${allTasks.length}`);
-
-				await downloadTiles(allTasks, backoffConfig, 8);
-				appendResponse("Download complete.");
-
-				for (const z of zoomLevels) {
-					const after = await fetchTileCount(extent, z);
-					appendResponse(`z=${z} after: ${JSON.stringify(after)}`);
-				}
+				const data = await response.json();
+				appendResponse(`Job started: ${data.total} tiles.`);
+				attachJob(data.job_id, 0);
 			} catch (error) {
-				appendResponse(`Download error: ${error.message}`);
-			} finally {
+				appendResponse(`Start error: ${error.message}`);
 				ui.downloadBtn.disabled = false;
 			}
 		});
 
+		ui.pauseBtn.addEventListener("click", async () => {
+			if (!activeJob) {
+				return;
+			}
+			const action = ui.pauseBtn.textContent === "Resume" ? "resume" : "pause";
+			ui.pauseBtn.disabled = true;
+			try {
+				await fetch(`/scrapper/auto-download/${action}?job_id=${encodeURIComponent(activeJob.jobId)}`, { method: "POST" });
+				await pollJobStatus();
+			} catch (error) {
+				appendResponse(`${action} error: ${error.message}`);
+			}
+		});
+
+		ui.cancelBtn.addEventListener("click", async () => {
+			if (!activeJob) {
+				return;
+			}
+			ui.cancelBtn.disabled = true;
+			try {
+				await fetch(`/scrapper/auto-download/cancel?job_id=${encodeURIComponent(activeJob.jobId)}`, { method: "POST" });
+				await pollJobStatus();
+			} catch (error) {
+				appendResponse(`Cancel error: ${error.message}`);
+			}
+		});
+
 		populateZoomLevels();
+		reattachActiveJob();
 	</script>
 </body>
 </html>

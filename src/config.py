@@ -13,16 +13,11 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8100
 
-    # Reverse proxy settings
-    REVERSE_PROXY_HOST: Optional[str] = None
-    REVERSE_PROXY_PORT: Optional[int] = None
-
-    # Logging
-    LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    LOG_LEVEL: str = "INFO"
-
     # GeoTIFF Export settings
     GEOTIFF_MAX_WORKERS: Optional[int] = None  # None = auto (min 2, max 8 based on CPU count)
+
+    # Auto tile prefetch settings
+    PREFETCH_MAX_WORKERS: Optional[int] = None  # None = auto (min 2, max 8 based on CPU count)
 
     class Config:
         env_file = ".env"

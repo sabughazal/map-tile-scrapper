@@ -131,12 +131,53 @@ button.small {
 .extent-box,
 .zoom-box,
 .backoff-box,
+.progress-box,
 .responses-box {
     margin: 0 0 0.9rem;
     border: 1px solid rgba(135, 163, 186, 0.3);
     border-radius: 10px;
     padding: 0.7rem;
     background: rgba(9, 19, 29, 0.75);
+}
+
+.state-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--muted);
+}
+
+.state-label.running {
+    color: var(--accent);
+}
+
+.state-label.paused {
+    color: #fbbf24;
+}
+
+.state-label.cancelled,
+.state-label.failed {
+    color: var(--danger);
+}
+
+.progress-bar {
+    height: 8px;
+    border-radius: 999px;
+    background: rgba(135, 163, 186, 0.2);
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    width: 0;
+    border-radius: 999px;
+    background: var(--accent);
+    transition: width 200ms ease;
+}
+
+.progress-box .muted {
+    margin: 0.55rem 0 0;
 }
 
 pre {

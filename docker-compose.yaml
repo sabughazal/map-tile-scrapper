@@ -7,9 +7,6 @@ services:
     env_file:
       - path: .env
         required: false
-    environment:
-      OUTPUT_DIR: /app/data
-      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}
     volumes:
       - ./data:/app/data
     restart: unless-stopped

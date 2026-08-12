@@ -17,6 +17,7 @@ sys.path.append(str(current_dir.parent))
 
 from src.config import settings
 from src.geotiff_utils import GeotiffExportManager
+from src.prefetch_utils import TilePrefetchManager, BackoffConfig, PrefetchJobConflict
 
 
 
@@ -42,6 +43,20 @@ class GeotiffExportRequest(BaseModel):
     z: int
 
 
+class BackoffModel(BaseModel):
+    enabled: bool = True
+    window: int = 40
+    threshold: int = 10
+    step_ms: int = 250
+    max_delay_ms: int = 2000
+
+
+class AutoDownloadRequest(BaseModel):
+    extent: Extent
+    zoom_levels: list[int]
+    backoff: Optional[BackoffModel] = None
+
+
 def create_app() -> FastAPI:
 
     app = FastAPI(title="Map Tile Scrapper")
@@ -53,6 +68,12 @@ def create_app() -> FastAPI:
         max_retries=3,
         disconnect_timeout_sec=5.0,
         max_download_workers=settings.GEOTIFF_MAX_WORKERS,
+    )
+    prefetch_manager = TilePrefetchManager(
+        output_dir=settings.OUTPUT_DIR,
+        source_url=settings.SOURCE_URL,
+        max_retries=3,
+        max_workers=settings.PREFETCH_MAX_WORKERS,
     )
 
     if STATIC_DIR.exists():
@@ -210,6 +231,53 @@ def create_app() -> FastAPI:
             media_type="image/tiff",
             filename=geotiff_path.name,
         )
+
+    @app.post("/scrapper/auto-download/start")
+    async def auto_download_start(request: AutoDownloadRequest):
+        if not request.zoom_levels:
+            raise HTTPException(status_code=400, detail="Select at least one zoom level.")
+        backoff = request.backoff or BackoffModel()
+        try:
+            job = prefetch_manager.start_job(
+                zoom_levels=request.zoom_levels,
+                min_x=request.extent.minX,
+                min_y=request.extent.minY,
+                max_x=request.extent.maxX,
+                max_y=request.extent.maxY,
+                backoff=BackoffConfig(**backoff.model_dump()),
+            )
+        except PrefetchJobConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return job
+
+    @app.post("/scrapper/auto-download/pause")
+    async def auto_download_pause(job_id: str):
+        if not prefetch_manager.pause_job(job_id):
+            raise HTTPException(status_code=409, detail="Job cannot be paused.")
+        return {"paused": True, "job_id": job_id}
+
+    @app.post("/scrapper/auto-download/resume")
+    async def auto_download_resume(job_id: str):
+        if not prefetch_manager.resume_job(job_id):
+            raise HTTPException(status_code=409, detail="Job cannot be resumed.")
+        return {"resumed": True, "job_id": job_id}
+
+    @app.post("/scrapper/auto-download/cancel")
+    async def auto_download_cancel(job_id: str):
+        if not prefetch_manager.cancel_job(job_id):
+            raise HTTPException(status_code=404, detail="Prefetch job not found.")
+        return {"cancelled": True, "job_id": job_id}
+
+    @app.get("/scrapper/auto-download/status")
+    async def auto_download_status(job_id: str, last_seq: int = 0):
+        status = prefetch_manager.poll_status(job_id=job_id, last_seq=last_seq)
+        if status is None:
+            raise HTTPException(status_code=404, detail="Prefetch job not found.")
+        return status
+
+    @app.get("/scrapper/auto-download/active")
+    async def auto_download_active():
+        return prefetch_manager.get_active_job() or {"job_id": None}
 
     return app
 

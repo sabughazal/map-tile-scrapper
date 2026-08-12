@@ -40,10 +40,10 @@ Then edit `.env` values as needed.
 - `SOURCE_URL`: upstream XYZ template URL
 	- Must include `{z}`, `{x}`, `{y}` placeholders
 	- Example: `https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}`
-- `REVERSE_PROXY_HOST`: optional reverse-proxy host (currently not used by runtime logic)
-- `REVERSE_PROXY_PORT`: optional reverse-proxy port (currently not used by runtime logic)
-- `LOG_FORMAT`: logging format string
-- `LOG_LEVEL`: logging level (example: `INFO`, `DEBUG`)
+- `WEB_CONCURRENCY`: Gunicorn worker count in Docker (keep at `1`; job state is in-memory per process)
+- `APP_PORT`: host port published by docker compose (container listens on `8000`)
+- `GEOTIFF_MAX_WORKERS`: concurrent tile downloads for GeoTIFF export (empty = auto from CPU count)
+- `PREFETCH_MAX_WORKERS`: concurrent tile downloads for auto prefetch (empty = auto from CPU count)
 
 ## 4. Run the Application
 
