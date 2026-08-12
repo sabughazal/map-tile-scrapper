@@ -63,17 +63,17 @@ def create_app() -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> HTMLResponse:
-        return templates.TemplateResponse("index.html", {"request": request})
+        return templates.TemplateResponse(request, "index.html")
 
 
     @app.get("/auto", response_class=HTMLResponse)
     async def auto(request: Request) -> HTMLResponse:
-        return templates.TemplateResponse("auto.html", {"request": request})
+        return templates.TemplateResponse(request, "auto.html")
 
 
     @app.get("/geotiff", response_class=HTMLResponse)
     async def geotiff(request: Request) -> HTMLResponse:
-        return templates.TemplateResponse("geotiff.html", {"request": request})
+        return templates.TemplateResponse(request, "geotiff.html")
 
 
     @app.get("/scrapper/{z}/{x}/{y}")

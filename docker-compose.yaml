@@ -1,0 +1,21 @@
+services:
+  app:
+    build: .
+    image: map-tile-scrapper
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      OUTPUT_DIR: /app/data
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/scrapper/cache-stats')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
