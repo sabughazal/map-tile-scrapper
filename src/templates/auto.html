@@ -18,10 +18,11 @@
 	</nav>
 	<aside class="side-panel">
 		<h1>Auto Tile Downloader</h1>
-		<p class="muted">Draw a rectangle and choose zoom levels to prefetch tiles into cache.</p>
+		<p class="muted">Draw a rectangle or select the whole world, then choose zoom levels to prefetch tiles into cache.</p>
 
 		<section class="tool-row">
 			<button id="drawBtn" type="button">Draw Rectangle</button>
+			<button id="worldBtn" type="button" class="secondary">Select World</button>
 			<button id="clearBtn" type="button" class="secondary">Clear</button>
 		</section>
 
@@ -34,6 +35,7 @@
 			<div class="section-head">
 				<h2>Zoom Levels</h2>
 				<div class="quick-actions">
+					<button id="infoBtn" type="button" class="info-btn" title="Tiles per zoom" aria-label="Tiles per zoom">?</button>
 					<button id="selectAllZoom" type="button" class="secondary small">All</button>
 					<button id="clearZoom" type="button" class="secondary small">None</button>
 				</div>
@@ -89,6 +91,47 @@
 		</section>
 	</aside>
 
+	<div id="infoModal" class="modal-overlay" hidden>
+		<div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="infoModalTitle">
+			<div class="modal-head">
+				<h2 id="infoModalTitle">Tiles per Zoom (whole world)</h2>
+				<button id="infoModalClose" type="button" class="modal-close" aria-label="Close">&times;</button>
+			</div>
+			<p class="muted">Approximate counts to cover the entire world, assuming ~20&nbsp;KB per tile.</p>
+			<div class="modal-table-wrap">
+				<table class="info-table">
+					<thead>
+						<tr><th>Zoom</th><th>Tiles</th><th>Est. size</th></tr>
+					</thead>
+					<tbody>
+						<tr><td>0</td><td>1</td><td>20 KB</td></tr>
+						<tr><td>1</td><td>4</td><td>80 KB</td></tr>
+						<tr><td>2</td><td>16</td><td>320 KB</td></tr>
+						<tr><td>3</td><td>64</td><td>1.25 MB</td></tr>
+						<tr><td>4</td><td>256</td><td>5 MB</td></tr>
+						<tr><td>5</td><td>1,024</td><td>20 MB</td></tr>
+						<tr><td>6</td><td>4,096</td><td>80 MB</td></tr>
+						<tr><td>7</td><td>16,384</td><td>320 MB</td></tr>
+						<tr><td>8</td><td>65,536</td><td>1.25 GB</td></tr>
+						<tr><td>9</td><td>262,144</td><td>5 GB</td></tr>
+						<tr><td>10</td><td>1,048,576</td><td>20 GB</td></tr>
+						<tr><td>11</td><td>4,194,304</td><td>80 GB</td></tr>
+						<tr><td>12</td><td>16,777,216</td><td>320 GB</td></tr>
+						<tr><td>13</td><td>67,108,864</td><td>1.25 TB</td></tr>
+						<tr><td>14</td><td>268,435,456</td><td>5 TB</td></tr>
+						<tr><td>15</td><td>1,073,741,824</td><td>20 TB</td></tr>
+						<tr><td>16</td><td>4,294,967,296</td><td>80 TB</td></tr>
+						<tr><td>17</td><td>17,179,869,184</td><td>320 TB</td></tr>
+						<tr><td>18</td><td>68,719,476,736</td><td>1.25 PB</td></tr>
+						<tr><td>19</td><td>274,877,906,944</td><td>5 PB</td></tr>
+						<tr><td>20</td><td>1,099,511,627,776</td><td>20 PB</td></tr>
+						<tr><td>21</td><td>4,398,046,511,104</td><td>80 PB</td></tr>
+					</tbody>
+				</table>
+			</div>
+		</div>
+	</div>
+
 	<script src="https://cdn.jsdelivr.net/npm/ol@9.2.4/dist/ol.js"></script>
 	<script>
 		const MAX_ZOOM = 21;
@@ -97,7 +140,11 @@
 
 		const ui = {
 			drawBtn: document.getElementById("drawBtn"),
+			worldBtn: document.getElementById("worldBtn"),
 			clearBtn: document.getElementById("clearBtn"),
+			infoBtn: document.getElementById("infoBtn"),
+			infoModal: document.getElementById("infoModal"),
+			infoModalClose: document.getElementById("infoModalClose"),
 			downloadBtn: document.getElementById("downloadBtn"),
 			pauseBtn: document.getElementById("pauseBtn"),
 			cancelBtn: document.getElementById("cancelBtn"),
@@ -359,6 +406,49 @@
 			drawSource.clear();
 			selectedGeometry = null;
 			ui.extentText.textContent = "No area selected";
+		});
+
+		// Web Mercator latitude limit for full-world coverage.
+		const WORLD_LON_LAT = [-180, -85.05112878, 180, 85.05112878];
+
+		ui.worldBtn.addEventListener("click", () => {
+			drawInteraction.setActive(false);
+			const min = ol.proj.fromLonLat([WORLD_LON_LAT[0], WORLD_LON_LAT[1]]);
+			const max = ol.proj.fromLonLat([WORLD_LON_LAT[2], WORLD_LON_LAT[3]]);
+			const ring = [
+				[min[0], min[1]],
+				[max[0], min[1]],
+				[max[0], max[1]],
+				[min[0], max[1]],
+				[min[0], min[1]]
+			];
+			const geometry = new ol.geom.Polygon([ring]);
+			drawSource.clear();
+			drawSource.addFeature(new ol.Feature(geometry));
+			selectedGeometry = geometry;
+			ui.extentText.textContent = JSON.stringify(getSelectedExtent(), null, 2);
+			map.getView().fit(geometry.getExtent(), { padding: [20, 20, 20, 20], duration: 200 });
+		});
+
+		function openInfoModal() {
+			ui.infoModal.hidden = false;
+		}
+
+		function closeInfoModal() {
+			ui.infoModal.hidden = true;
+		}
+
+		ui.infoBtn.addEventListener("click", openInfoModal);
+		ui.infoModalClose.addEventListener("click", closeInfoModal);
+		ui.infoModal.addEventListener("click", (event) => {
+			if (event.target === ui.infoModal) {
+				closeInfoModal();
+			}
+		});
+		document.addEventListener("keydown", (event) => {
+			if (event.key === "Escape" && !ui.infoModal.hidden) {
+				closeInfoModal();
+			}
 		});
 
 		ui.selectAllZoom.addEventListener("click", () => {
