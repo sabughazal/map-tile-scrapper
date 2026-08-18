@@ -18,6 +18,7 @@ sys.path.append(str(current_dir.parent))
 from src.config import settings
 from src.geotiff_utils import GeotiffExportManager
 from src.prefetch_utils import TilePrefetchManager, BackoffConfig, PrefetchJobConflict
+from src.coverage_utils import CoverageIndex
 
 
 
@@ -75,6 +76,11 @@ def create_app() -> FastAPI:
         max_retries=3,
         max_workers=settings.PREFETCH_MAX_WORKERS,
     )
+    coverage_index = CoverageIndex(output_dir=settings.OUTPUT_DIR)
+    # md5 is one-way, so record which URL owns this collection while we still know.
+    coverage_index.write_source_url(
+        hashlib.md5(settings.SOURCE_URL.encode()).hexdigest(), settings.SOURCE_URL
+    )
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -97,13 +103,37 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(request, "geotiff.html")
 
 
+    @app.get("/datasets", response_class=HTMLResponse)
+    async def datasets(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(request, "datasets.html")
+
+
+    # Coverage takes `collection` as a query param rather than sitting at
+    # /scrapper/datasets/{collection}/coverage, which would have the same segment
+    # count as /scrapper/{z}/{x}/{y} and get shadowed by it (422 on the int parse).
+    @app.get("/scrapper/datasets")
+    async def list_datasets():
+        return {
+            "datasets": [
+                coverage_index.stats(collection)
+                for collection in coverage_index.list_collections()
+            ]
+        }
+
+
+    @app.get("/scrapper/datasets/coverage")
+    async def dataset_coverage(collection: str):
+        if collection not in coverage_index.list_collections():
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        return coverage_index.coverage(collection)
+
+
     @app.get("/scrapper/{z}/{x}/{y}")
     async def scrape_tile(z: int, x: int, y: int):
         nonlocal cache_hits, cache_misses
         collection = hashlib.md5((settings.SOURCE_URL).encode()).hexdigest()
 
         output_path = pathlib.Path(settings.OUTPUT_DIR) / collection / str(z) / str(x)
-        output_path.mkdir(parents=True, exist_ok=True)
         tile_path = output_path / f"{y}.png"
 
         # Serve from local cache first if tile is already stored.
@@ -130,6 +160,8 @@ def create_app() -> FastAPI:
         if response.status_code != 200:
             raise HTTPException(status_code=response.status_code, detail=f"Failed to fetch tile from {url}")
 
+        # Created only once the fetch succeeded, so failures leave no empty dirs.
+        output_path.mkdir(parents=True, exist_ok=True)
         tile_path.write_bytes(response.content)
 
         content_type: Optional[str] = response.headers.get("content-type")

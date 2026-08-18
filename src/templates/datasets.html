@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Dataset Explorer</title>
+	<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@9.2.4/ol.css">
+	<link rel="stylesheet" href="/static/css/datasets.css">
+	<link rel="shortcut icon" href="/static/favicon.ico" type="image/x-icon">
+</head>
+<body>
+	<div id="map" aria-label="Map"></div>
+
+	<nav class="page-nav" aria-label="Page navigation">
+		<a class="page-link" href="/">Map Preview</a>
+		<a class="page-link" href="/auto">Auto Downloader</a>
+		<a class="page-link" href="/geotiff">GeoTIFF Export</a>
+		<a class="page-link current" href="/datasets">Datasets</a>
+	</nav>
+
+	<aside class="side-panel">
+		<h1>Dataset Explorer</h1>
+		<p class="muted">Cached tile coverage per dataset. Drag the slider to draw the area covered at each zoom level.</p>
+
+		<section class="panel-block">
+			<h2>Dataset</h2>
+			<select id="datasetSelect" aria-label="Dataset"></select>
+			<p class="source-url" id="sourceUrl"></p>
+		</section>
+
+		<section class="panel-block">
+			<h2>Totals</h2>
+			<div class="totals">
+				<div><span>Tiles</span><strong id="totalTiles">-</strong></div>
+				<div><span>Size</span><strong id="totalBytes">-</strong></div>
+				<div><span>Zooms</span><strong id="zoomRange">-</strong></div>
+			</div>
+		</section>
+
+		<section class="panel-block">
+			<h2>Coverage on Map</h2>
+			<div class="zoom-row">
+				<span id="zoomMin">-</span>
+				<input id="zoomSlider" type="range" min="0" max="21" step="1" value="0" aria-label="Zoom level">
+				<span class="zoom-value" id="zoomValue">-</span>
+			</div>
+			<p class="muted" id="zoomSummary" style="margin-bottom:0"></p>
+			<div class="legend"><span>sparse</span><i class="ramp"></i><span>full</span></div>
+		</section>
+
+		<section class="panel-block">
+			<h2>Completeness by Zoom</h2>
+			<div class="table-wrap">
+				<table>
+					<thead>
+						<tr>
+							<th title="Zoom level">z</th>
+							<th title="Cached tiles at this zoom">tiles</th>
+							<th title="Bytes on disk">size</th>
+							<th title="Share of the whole world at this zoom">world</th>
+							<th title="Share of the bounding box of cached tiles. Dotted when the tiles form disjoint regions, which makes the bounding box a meaningless denominator.">bbox</th>
+							<th title="Tiles here relative to 4x the level above. Can exceed 100% when tiles exist whose parents are not cached.">child</th>
+							<th title="Share of tiles one level up that have all four children cached — can you zoom in everywhere you can currently see?">descend</th>
+						</tr>
+					</thead>
+					<tbody id="levelRows"></tbody>
+				</table>
+			</div>
+			<div id="statusText" class="status" aria-live="polite"></div>
+		</section>
+	</aside>
+
+	<script src="https://cdn.jsdelivr.net/npm/ol@9.2.4/dist/ol.js"></script>
+	<script>
+		const POLL_INTERVAL_MS = 2000;
+
+		const ui = {
+			datasetSelect: document.getElementById("datasetSelect"),
+			sourceUrl: document.getElementById("sourceUrl"),
+			totalTiles: document.getElementById("totalTiles"),
+			totalBytes: document.getElementById("totalBytes"),
+			zoomRange: document.getElementById("zoomRange"),
+			zoomSlider: document.getElementById("zoomSlider"),
+			zoomValue: document.getElementById("zoomValue"),
+			zoomMin: document.getElementById("zoomMin"),
+			zoomSummary: document.getElementById("zoomSummary"),
+			levelRows: document.getElementById("levelRows"),
+			statusText: document.getElementById("statusText")
+		};
+
+		const coverageSource = new ol.source.Vector();
+		const coverageLayer = new ol.layer.Vector({
+			source: coverageSource,
+			style: (feature) => new ol.style.Style({
+				stroke: new ol.style.Stroke({ color: "rgba(82, 216, 181, 0.55)", width: 0.5 }),
+				// Ratio of cached tiles in this aggregated cell drives the fill.
+				fill: new ol.style.Fill({
+					color: `rgba(82, 216, 181, ${0.1 + (0.75 * feature.get("ratio"))})`
+				})
+			})
+		});
+
+		const map = new ol.Map({
+			target: "map",
+			controls: ol.control.defaults.defaults({ zoom: false }),
+			layers: [
+				new ol.layer.Tile({
+					source: new ol.source.XYZ({ url: "/scrapper/{z}/{x}/{y}", maxZoom: 21 })
+				}),
+				coverageLayer
+			],
+			view: new ol.View({
+				center: ol.proj.fromLonLat([54, 24]),
+				zoom: 4,
+				minZoom: 2,
+				maxZoom: 21
+			})
+		});
+
+		const state = {
+			datasets: [],
+			collection: null,
+			coverage: null,
+			zoom: null,
+			renderedTiles: null
+		};
+
+		function setStatus(message, tone = "") {
+			ui.statusText.textContent = message;
+			ui.statusText.className = tone ? `status ${tone}` : "status";
+		}
+
+		function formatBytes(bytes) {
+			const units = ["B", "KB", "MB", "GB", "TB"];
+			let value = Number(bytes) || 0;
+			let unit = 0;
+			while (value >= 1024 && unit < units.length - 1) {
+				value /= 1024;
+				unit += 1;
+			}
+			return `${value < 10 && unit > 0 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+		}
+
+		function formatPct(value) {
+			if (value === null || value === undefined) return "-";
+			if (value === 0) return "0%";
+			if (value >= 99.995) return "100%";
+			if (value < 0.01) return "<0.01%";
+			return `${value.toFixed(value < 1 ? 2 : 1)}%`;
+		}
+
+		function currentDataset() {
+			return state.datasets.find((item) => item.collection === state.collection) || null;
+		}
+
+		function renderTable(dataset) {
+			ui.levelRows.replaceChildren();
+
+			for (const level of dataset.levels) {
+				const row = document.createElement("tr");
+				row.dataset.z = String(level.z);
+				if (level.z === state.zoom) {
+					row.className = "active";
+				}
+
+				const cells = [
+					{ text: `Z${level.z}` },
+					{ text: level.tiles.toLocaleString() },
+					{ text: formatBytes(level.bytes) },
+					{ text: formatPct(level.world_pct), full: level.world_pct >= 99.995, ratio: level.world_pct },
+					{
+						text: formatPct(level.footprint_pct),
+						unreliable: !level.footprint_reliable,
+						title: level.footprint_reliable ? "" : `${level.clusters} disjoint regions`
+					},
+					{ text: formatPct(level.child_fill_pct) },
+					{
+						text: formatPct(level.full_parents_pct),
+						full: level.full_parents_pct !== null && level.full_parents_pct >= 99.995,
+						ratio: level.full_parents_pct
+					}
+				];
+
+				for (const cell of cells) {
+					const td = document.createElement("td");
+					td.textContent = cell.text;
+					if (cell.full) td.classList.add("full");
+					if (cell.unreliable) td.classList.add("unreliable");
+					if (cell.title) td.title = cell.title;
+					if (Number.isFinite(cell.ratio) && cell.ratio > 0) {
+						td.classList.add("bar");
+						const bar = document.createElement("i");
+						bar.style.right = `${0.35 + (0.65 * (1 - Math.min(cell.ratio, 100) / 100))}rem`;
+						td.appendChild(bar);
+					}
+					row.appendChild(td);
+				}
+
+				row.addEventListener("click", () => selectZoom(level.z));
+				ui.levelRows.appendChild(row);
+			}
+		}
+
+		function renderCoverage() {
+			coverageSource.clear();
+			if (!state.coverage || state.zoom === null) {
+				ui.zoomSummary.textContent = "";
+				return;
+			}
+
+			const entry = state.coverage[String(state.zoom)];
+			if (!entry) {
+				ui.zoomSummary.textContent = `No tiles cached at Z${state.zoom}.`;
+				return;
+			}
+
+			const features = entry.cells.map((cell) => {
+				const [minLon, minLat, maxLon, maxLat] = cell.bounds;
+				const min = ol.proj.fromLonLat([minLon, minLat]);
+				const max = ol.proj.fromLonLat([maxLon, maxLat]);
+				return new ol.Feature({
+					geometry: new ol.geom.Polygon([[
+						[min[0], min[1]], [max[0], min[1]],
+						[max[0], max[1]], [min[0], max[1]], [min[0], min[1]]
+					]]),
+					ratio: cell.ratio
+				});
+			});
+			coverageSource.addFeatures(features);
+
+			const rolled = entry.agg_zoom !== Number(state.zoom)
+				? ` · ${entry.cells.length} cells rolled up to Z${entry.agg_zoom}`
+				: ` · ${entry.cells.length} tiles drawn`;
+			ui.zoomSummary.textContent = `${entry.tiles.toLocaleString()} tiles at Z${state.zoom}${rolled}`;
+		}
+
+		function selectZoom(zoom) {
+			state.zoom = Number(zoom);
+			ui.zoomSlider.value = String(state.zoom);
+			ui.zoomValue.textContent = `Z${state.zoom}`;
+			for (const row of ui.levelRows.children) {
+				row.classList.toggle("active", Number(row.dataset.z) === state.zoom);
+			}
+			renderCoverage();
+		}
+
+		function renderDataset() {
+			const dataset = currentDataset();
+			if (!dataset) return;
+
+			// The select already shows the URL when known, so surface the collection id
+			// here; when the URL is unknown the id is all we have to identify it by.
+			ui.sourceUrl.textContent = dataset.source_url
+				? dataset.collection
+				: `${dataset.collection} — source URL unknown (md5 is one-way; run the app with this SOURCE_URL to record it)`;
+			ui.totalTiles.textContent = dataset.total_tiles.toLocaleString();
+			ui.totalBytes.textContent = formatBytes(dataset.total_bytes);
+			ui.zoomRange.textContent = dataset.levels.length
+				? `${dataset.min_zoom}-${dataset.max_zoom}`
+				: "-";
+
+			const zooms = dataset.levels.map((level) => level.z);
+			if (zooms.length) {
+				ui.zoomSlider.min = String(zooms[0]);
+				ui.zoomSlider.max = String(zooms[zooms.length - 1]);
+				ui.zoomMin.textContent = `Z${zooms[0]}`;
+				if (state.zoom === null || !zooms.includes(state.zoom)) {
+					state.zoom = zooms[Math.floor(zooms.length / 2)];
+				}
+			}
+
+			renderTable(dataset);
+			selectZoom(state.zoom);
+		}
+
+		async function loadCoverage() {
+			if (!state.collection) return;
+			const url = `/scrapper/datasets/coverage?collection=${encodeURIComponent(state.collection)}`;
+			const response = await fetch(url, { cache: "no-store" });
+			if (!response.ok) throw new Error(`Coverage request failed: ${response.status}`);
+			state.coverage = await response.json();
+			renderCoverage();
+		}
+
+		async function loadDatasets({ initial = false } = {}) {
+			try {
+				const response = await fetch("/scrapper/datasets", { cache: "no-store" });
+				if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+
+				const data = await response.json();
+				state.datasets = data.datasets || [];
+
+				if (!state.datasets.length) {
+					setStatus("No datasets found in the output directory.", "error");
+					return;
+				}
+
+				if (!state.datasets.some((item) => item.collection === state.collection)) {
+					state.collection = state.datasets[0].collection;
+					initial = true;
+				}
+
+				if (initial) {
+					ui.datasetSelect.replaceChildren();
+					for (const dataset of state.datasets) {
+						const option = document.createElement("option");
+						option.value = dataset.collection;
+						option.textContent = dataset.source_url || dataset.collection.slice(0, 12);
+						ui.datasetSelect.appendChild(option);
+					}
+					ui.datasetSelect.value = state.collection;
+				}
+
+				const dataset = currentDataset();
+				const grew = dataset && dataset.total_tiles !== state.renderedTiles;
+				if (initial || grew) {
+					state.renderedTiles = dataset ? dataset.total_tiles : null;
+					renderDataset();
+					// Keeps the map live while a download writes tiles.
+					await loadCoverage();
+				}
+				setStatus("");
+			} catch (error) {
+				setStatus(error.message, "error");
+			}
+		}
+
+		ui.datasetSelect.addEventListener("change", async () => {
+			state.collection = ui.datasetSelect.value;
+			state.zoom = null;
+			state.coverage = null;
+			state.renderedTiles = currentDataset() ? currentDataset().total_tiles : null;
+			coverageSource.clear();
+			renderDataset();
+			try {
+				await loadCoverage();
+			} catch (error) {
+				setStatus(error.message, "error");
+			}
+		});
+
+		ui.zoomSlider.addEventListener("input", () => selectZoom(ui.zoomSlider.value));
+
+		loadDatasets({ initial: true });
+		// Counts climb live while an auto-download or export is writing tiles.
+		setInterval(() => loadDatasets(), POLL_INTERVAL_MS);
+	</script>
+</body>
+</html>

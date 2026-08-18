@@ -1,9 +1,11 @@
 # Map Tile Scrapper
 
-FastAPI service that proxies XYZ map tiles, caches them on disk, exposes cache metrics, and provides two UI pages:
+FastAPI service that proxies XYZ map tiles, caches them on disk, exposes cache metrics, and provides four UI pages:
 
 - `/` tile preview page with cache stats
 - `/auto` rectangle-based tile prefetch page
+- `/geotiff` GeoTIFF export planner with a live tile-matrix view
+- `/datasets` dataset explorer: per-zoom completeness and coverage on the map
 
 ## 1. Prerequisites
 
@@ -78,6 +80,8 @@ Core pages:
 
 - `/` map preview UI
 - `/auto` auto tile download UI
+- `/geotiff` GeoTIFF export UI
+- `/datasets` dataset coverage explorer
 
 ## 6. API Endpoints
 
@@ -139,6 +143,75 @@ Response body:
 }
 ```
 
+### Datasets
+
+- `GET /scrapper/datasets`
+
+Returns one entry per cached collection with totals and a per-zoom breakdown:
+
+```json
+{
+	"datasets": [
+		{
+			"collection": "184c8b2b1b08f9b9a3281aee074734de",
+			"source_url": "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+			"total_tiles": 439808,
+			"total_bytes": 4824375296,
+			"min_zoom": 0,
+			"max_zoom": 21,
+			"levels": [
+				{
+					"z": 10,
+					"tiles": 7853,
+					"bytes": 91234567,
+					"width": 514,
+					"height": 561,
+					"clusters": 3,
+					"world_pct": 0.7489,
+					"footprint_pct": 2.72,
+					"footprint_reliable": false,
+					"child_fill_pct": 90.8,
+					"full_parents_pct": 82.3
+				}
+			]
+		}
+	]
+}
+```
+
+Completeness is reported four ways, because no single denominator fits every zoom:
+
+- `world_pct`: share of the whole world at that zoom. Meaningful where a full pyramid exists (z0-7 here); reads ~0 for regional data.
+- `footprint_pct`: share of the bounding box of cached tiles. `footprint_reliable` is `false` when the tiles form more than one region (`clusters` > 1), which makes the bounding box a meaningless denominator.
+- `child_fill_pct`: tiles at this zoom relative to 4x the level above. Can exceed 100% when tiles exist whose parents were never cached.
+- `full_parents_pct`: share of tiles one level up that have all four children cached. The one that answers "can I zoom in everywhere I can currently see?", and the only one unaffected by disjoint regions.
+
+No single cross-zoom percentage is reported: summing tiles across zooms is dominated by the deepest level and means nothing.
+
+- `GET /scrapper/datasets/coverage?collection=<md5>`
+
+Coverage polygons per zoom, for drawing on a map:
+
+```json
+{
+	"11": {
+		"agg_zoom": 9,
+		"tiles": 29700,
+		"cells": [{ "bounds": [54.0, 24.0, 54.7, 24.7], "ratio": 0.875 }]
+	}
+}
+```
+
+Tiles are rolled up to a coarser `agg_zoom` until a zoom fits under 4000 cells, so the payload stays small at every level. `ratio` is the share of that cell's tiles actually cached, and drives fill opacity in the UI.
+
+### Coverage Index
+
+Coverage is derived from the directory layout alone; no tile is ever opened. Freshness comes from `x`-directory mtimes, so a request that finds nothing new costs one stat per `x`-directory (~10 ms for 440k tiles) and only changed directories are re-read. There is no rebuild button and none is needed: counts update live while a download is writing.
+
+Each collection caches its index at `OUTPUT_DIR/<collection>/.coverage-index.json` so a restart does not pay a full cold scan. Deleting the file is safe; it is rebuilt on the next request.
+
+`OUTPUT_DIR/<collection>/source.json` records which `SOURCE_URL` produced a collection, written on startup for the currently configured URL. Because the collection name is an MD5 hash, a collection cached under a different `SOURCE_URL` shows as a bare hash until the app is run with that URL (or the file is written by hand).
+
 ## 7. Cache Storage Layout
 
 Tiles are written under:
@@ -153,6 +226,7 @@ Tiles are written under:
 - Counters reset when the process restarts.
 - If multiple workers are used, each worker has its own independent counters.
 - Disk cache is shared via `OUTPUT_DIR`.
+- Tile directories are created only after a successful fetch, so failed tiles leave no empty directories behind. Empty directories from older versions are ignored by the coverage index.
 
 ## 9. Troubleshooting
 

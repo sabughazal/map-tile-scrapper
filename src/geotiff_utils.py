@@ -91,7 +91,6 @@ def _calculate_tile_grid_bounds(tasks: list[TileTask]) -> tuple[float, float, fl
 
 def _download_tile_worker(task: TileTask, source_url: str, output_dir: str, collection: str) -> dict[str, Any]:
     tile_path = _tile_cache_path(output_dir, collection, task.z, task.x, task.y)
-    tile_path.parent.mkdir(parents=True, exist_ok=True)
 
     if tile_path.is_file():
         return {
@@ -118,6 +117,8 @@ def _download_tile_worker(task: TileTask, source_url: str, output_dir: str, coll
                 "error": f"Upstream responded with {response.status_code}",
             }
 
+        # Created only once the fetch succeeded, so 404s leave no empty dirs.
+        tile_path.parent.mkdir(parents=True, exist_ok=True)
         tile_path.write_bytes(response.content)
         return {
             "ok": True,
