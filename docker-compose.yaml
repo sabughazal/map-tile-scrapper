@@ -8,6 +8,7 @@ services:
       - path: .env
         required: false
     volumes:
+      - ./src:/app/src
       - ./data:/app/data
     restart: unless-stopped
     healthcheck:
